@@ -1,0 +1,14 @@
+node_modules/
+**/dist/
+.DS_Store
+*.log
+.env*
+.auth/
+.v2c/
+.video_agent/
+BRIEF.md
+RUN_STATE.md
+PLAN*.md
+*_REVIEW*.md
+*.bak
+EXECUTION_REPORT*.md

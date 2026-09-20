@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "ZCode for Chrome",
+  "version": "0.1.0",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["tabs", "scripting", "storage", "offscreen", "debugger", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "minimum_chrome_version": "120"
+}

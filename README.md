@@ -17,6 +17,11 @@ el service worker la ejecuta con chrome.tabs, chrome.scripting o chrome.debugger
 la respuesta regresa por el mismo camino hasta ZCode
 ```
 
+El offscreen document solo dispone de la mensajería de `chrome.runtime`: no
+tiene `chrome.storage` ni `chrome.runtime.getManifest`, así que lo que
+necesita de ahí (el token y la versión de la extensión) se lo pide al service
+worker por mensaje.
+
 El repositorio es un monorepo con tres paquetes: `packages/shared` (tipos y
 constantes del protocolo), `packages/server` (servidor MCP stdio con el puente
 WebSocket) y `packages/extension` (la extensión que se carga en Chrome).
@@ -140,7 +145,9 @@ npm run smoke:live   # contra tu Chrome real, con la extensión cargada
 
 `smoke` comprueba que el servidor expone las 20 tools, que rechaza origins web
 y tokens erróneos, que `screenshot` devuelve una imagen, que los errores
-viajan con su código y que el proceso muere al cerrar stdin.
+viajan con su código y que el proceso muere al cerrar stdin. También comprueba
+que `dist/offscreen.js` no usa APIs `chrome.*` fuera de las que Chrome expone
+en los offscreen documents.
 
 `smoke:live` abre `https://example.com/`, espera el texto de la página, hace
 snapshot, pulsa el link por ref, vuelve atrás, captura pantalla, evalúa

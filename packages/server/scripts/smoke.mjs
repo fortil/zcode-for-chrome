@@ -1,9 +1,12 @@
 // Smoke headless del servidor MCP: lanza el proceso real por stdio, simula la
 // extensión por WebSocket y ejercita los tools con el Client del SDK.
 // Sin dependencias nuevas: usa `ws` y `@modelcontextprotocol/sdk` del workspace.
+// También vigila que dist/offscreen.js solo use las APIs chrome.* que Chrome
+// expone en el contexto de un offscreen document (checkOffscreenApiSurface).
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { readFileSync } from "node:fs";
 import { WebSocket } from "ws";
 
 const PORT = 8790; // fuera del rango 8765-8785 para no chocar con un servidor real
@@ -55,7 +58,41 @@ function textOf(result) {
   return JSON.parse(block.text);
 }
 
+// APIs chrome.* que Chromium expone en el contexto offscreen_extension, según
+// extensions/common/api/_api_features.json: la mensajería de runtime y poco
+// más. Si Chrome amplía la lista, hay que ampliar este Set con esa evidencia.
+const OFFSCREEN_ALLOWED_APIS = new Set([
+  "runtime.sendMessage",
+  "runtime.onMessage",
+  "runtime.connect",
+  "runtime.onConnect",
+  "runtime.getURL",
+  "runtime.id",
+  "runtime.lastError",
+]);
+
+// Red de seguridad estática sobre el bundle (el riesgo real es transitivo:
+// importar settings.ts desde offscreen.ts metería chrome.storage sin que tsc
+// proteste). No captura accesos indirectos tipo `const r = chrome.runtime`.
+function checkOffscreenApiSurface() {
+  let code;
+  try {
+    code = readFileSync("packages/extension/dist/offscreen.js", "utf8");
+  } catch {
+    fail("falta packages/extension/dist/offscreen.js: ejecuta npm run build");
+  }
+  const re = /\bchrome\.([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)/g;
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const api = m[1].split(".").slice(0, 2).join(".");
+    if (!OFFSCREEN_ALLOWED_APIS.has(api)) {
+      fail(`offscreen.js usa chrome.${api}, que Chrome no expone en offscreen documents`);
+    }
+  }
+}
+
 async function main() {
+  checkOffscreenApiSurface();
   if (process.argv.includes("--live")) {
     return live();
   }

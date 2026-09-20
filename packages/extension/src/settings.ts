@@ -14,8 +14,8 @@ export const DEFAULT_SETTINGS: Settings = {
   allowEvaluateJs: true,
 };
 
-// Cada campo vive bajo su propia clave en local storage: el offscreen
-// document lee "token" directamente, sin conocer la forma completa.
+// Cada campo vive bajo su propia clave en local storage: solo el service
+// worker puede leerlas; el token llega al offscreen document por get_hello.
 export async function getSettings(): Promise<Settings> {
   const stored = (await chrome.storage.local.get(DEFAULT_SETTINGS)) as Partial<Settings>;
   return {

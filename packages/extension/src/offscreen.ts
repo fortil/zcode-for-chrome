@@ -1,6 +1,10 @@
+// Este documento corre en el contexto `offscreen_extension`: Chrome solo
+// expone ahí chrome.runtime.{sendMessage,onMessage,connect,onConnect,getURL,
+// id,lastError}. Cualquier otra API chrome.* es undefined o no-función en
+// este contexto; `npm run smoke` lo comprueba sobre el bundle compilado.
 import { PORT_RANGE } from "@zcode-for-chrome/shared";
 import type { BridgeRequest, BridgeResponse, Hello } from "@zcode-for-chrome/shared";
-import type { OffscreenToSw } from "./messages.js";
+import type { HelloInfo, OffscreenToSw } from "./messages.js";
 
 const PROBE_INTERVAL_MS = 2000;
 const PROBE_TIMEOUT_MS = 500;
@@ -47,16 +51,23 @@ async function findServerPort(): Promise<number | null> {
   return null;
 }
 
-async function sendHello(): Promise<void> {
-  const { token } = await chrome.storage.local.get("token");
+async function sendHello(ws: WebSocket): Promise<void> {
+  const info = (await chrome.runtime
+    .sendMessage({ kind: "get_hello" } satisfies OffscreenToSw)
+    .catch(() => null)) as HelloInfo | null;
+  if (!info || typeof info.extensionVersion !== "string") {
+    console.warn("sin respuesta del service worker al get_hello; cierro para reintentar");
+    ws.close();
+    return;
+  }
   const hello: Hello = {
     type: "hello",
-    extensionVersion: chrome.runtime.getManifest().version,
+    extensionVersion: info.extensionVersion,
     chromeVersion: navigator.userAgent,
   };
   // Sin token configurado se omite: el servidor solo lo exige si él tiene uno.
-  if (typeof token === "string" && token !== "") hello.token = token;
-  socket?.send(JSON.stringify(hello));
+  if (typeof info.token === "string" && info.token !== "") hello.token = info.token;
+  ws.send(JSON.stringify(hello));
 }
 
 // Reenvía un request al service worker y devuelve por el WS la respuesta que
@@ -94,7 +105,7 @@ function connect(port: number): Promise<{ wasConnected: boolean }> {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
     socket = ws;
     const ackTimer = setTimeout(() => ws.close(), HELLO_ACK_TIMEOUT_MS);
-    ws.onopen = () => void sendHello();
+    ws.onopen = () => void sendHello(ws).catch(() => ws.close());
     ws.onmessage = (ev: MessageEvent) => {
       let msg: { type?: string } | null = null;
       try {

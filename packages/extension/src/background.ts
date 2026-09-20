@@ -1,22 +1,34 @@
 import { dispatch } from "./dispatch.js";
-import type { OffscreenToSw, PopupQuery } from "./messages.js";
-import { setSettings } from "./settings.js";
+import type { HelloInfo, OffscreenToSw, PopupQuery } from "./messages.js";
+import { getSettings, setSettings } from "./settings.js";
 
 const OFFSCREEN_URL = "offscreen.html";
 
+// void ensureOffscreen() se dispara a la vez desde el top-level del módulo y
+// desde onInstalled/onStartup: sin este lock, dos llamadas concurrentes ven
+// hasDocument()===false a la vez y la segunda createDocument() revienta con
+// "Only a single offscreen document may be created."
+let ensureOffscreenInFlight: Promise<void> | null = null;
+
 async function ensureOffscreen(): Promise<void> {
-  try {
-    if (await chrome.offscreen.hasDocument()) return;
-    await chrome.offscreen.createDocument({
-      url: OFFSCREEN_URL,
-      // No existe razón "WebSocket": WORKERS es la más cercana y Chrome no
-      // valida el uso real de la razón (D2).
-      reasons: ["WORKERS"],
-      justification: "Keep a persistent WebSocket to the local ZCode MCP server",
-    });
-  } catch (err) {
-    console.error("no se pudo crear el offscreen document", err);
-  }
+  if (ensureOffscreenInFlight) return ensureOffscreenInFlight;
+  ensureOffscreenInFlight = (async () => {
+    try {
+      if (await chrome.offscreen.hasDocument()) return;
+      await chrome.offscreen.createDocument({
+        url: OFFSCREEN_URL,
+        // No existe razón "WebSocket": WORKERS es la más cercana y Chrome no
+        // valida el uso real de la razón (D2).
+        reasons: ["WORKERS"],
+        justification: "Keep a persistent WebSocket to the local ZCode MCP server",
+      });
+    } catch (err) {
+      console.error("no se pudo crear el offscreen document", err);
+    } finally {
+      ensureOffscreenInFlight = null;
+    }
+  })();
+  return ensureOffscreenInFlight;
 }
 
 void ensureOffscreen();
@@ -53,6 +65,16 @@ chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
   if (m?.kind === "ws_state") {
     void chrome.storage.session.set({ wsState: m.state, wsPort: m.port ?? 0 });
     return false;
+  }
+  if (m?.kind === "get_hello") {
+    // El offscreen document solo tiene chrome.runtime de mensajería: ni
+    // chrome.storage ni chrome.runtime.getManifest están expuestos ahí por
+    // diseño de Chrome (extensions/common/api/_api_features.json). Lo que el
+    // hello necesita de ahí se responde desde aquí.
+    void getSettings().then((s) =>
+      sendResponse({ token: s.token, extensionVersion: chrome.runtime.getManifest().version } satisfies HelloInfo),
+    );
+    return true;
   }
   if (m?.kind === "get_status") {
     void getStatusForPopup().then(sendResponse);

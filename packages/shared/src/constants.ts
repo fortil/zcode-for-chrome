@@ -26,6 +26,8 @@ export const TOOL_TIMEOUTS_MS: Record<ToolName, number> = {
   press_key: 15000,
   scroll: 15000,
   evaluate_js: 20000,
+  list_profiles: 5000,
+  select_profile: 5000,
 };
 
 export const PROTECTED_SCHEMES: readonly string[] = [

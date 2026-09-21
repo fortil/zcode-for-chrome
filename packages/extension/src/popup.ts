@@ -10,6 +10,7 @@ const stateEl = byId("ws-state");
 const enabledEl = byId<HTMLInputElement>("enabled");
 const allowEvalEl = byId<HTMLInputElement>("allow-eval");
 const tokenEl = byId<HTMLInputElement>("token");
+const profileLabelEl = byId<HTMLInputElement>("profile-label");
 const blockedEl = byId<HTMLTextAreaElement>("blocked-hosts");
 const actionsEl = byId("actions");
 
@@ -22,14 +23,16 @@ const WS_LABELS: Record<string, string> = {
 async function refreshStatus(): Promise<void> {
   try {
     const status = (await chrome.runtime.sendMessage({ kind: "get_status" } satisfies PopupQuery)) as
-      | { wsState?: string; port?: number | null }
+      | { wsState?: string; port?: number | null; ports?: number[] }
       | undefined;
     if (!status) {
       stateEl.textContent = "sin respuesta del service worker";
       return;
     }
     const label = WS_LABELS[status.wsState ?? "disconnected"] ?? status.wsState ?? "?";
-    stateEl.textContent = status.port ? `${label} (puerto ${status.port})` : label;
+    const ports: number[] = Array.isArray(status.ports) ? status.ports : status.port ? [status.port] : [];
+    const portText = ports.length > 1 ? ` (puertos ${ports.join(", ")})` : status.port ? ` (puerto ${status.port})` : "";
+    stateEl.textContent = `${label}${portText}`;
   } catch (err) {
     stateEl.textContent = `error: ${String(err)}`;
   }
@@ -40,6 +43,7 @@ async function loadSettings(): Promise<void> {
   enabledEl.checked = settings.enabled;
   allowEvalEl.checked = settings.allowEvaluateJs;
   tokenEl.value = settings.token;
+  profileLabelEl.value = settings.profileLabel;
   blockedEl.value = settings.blockedHosts.join("\n");
 }
 
@@ -62,6 +66,7 @@ async function refreshActions(): Promise<void> {
 enabledEl.addEventListener("change", () => void setSettings({ enabled: enabledEl.checked }));
 allowEvalEl.addEventListener("change", () => void setSettings({ allowEvaluateJs: allowEvalEl.checked }));
 tokenEl.addEventListener("change", () => void setSettings({ token: tokenEl.value.trim() }));
+profileLabelEl.addEventListener("change", () => void setSettings({ profileLabel: profileLabelEl.value.trim() || "default" }));
 blockedEl.addEventListener("change", () =>
   void setSettings({
     blockedHosts: blockedEl.value

@@ -48,12 +48,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 interface StoredWsState {
   wsState: "probing" | "connected" | "disconnected";
   wsPort: number;
+  wsPorts: number[];
 }
 
 async function readWsState(): Promise<StoredWsState> {
   // storage.session sobrevive a las muertes del service worker y se limpia
   // al cerrar el navegador, que es justo la vida del estado del WS.
-  return (await chrome.storage.session.get({ wsState: "disconnected", wsPort: 0 })) as StoredWsState;
+  return (await chrome.storage.session.get({ wsState: "disconnected", wsPort: 0, wsPorts: [] })) as StoredWsState;
 }
 
 async function getStatusForPopup(): Promise<unknown> {
@@ -61,9 +62,16 @@ async function getStatusForPopup(): Promise<unknown> {
   return {
     wsState: ws.wsState,
     port: ws.wsPort || null,
+    ports: ws.wsPorts,
     extensionVersion: chrome.runtime.getManifest().version,
     chromeVersion: navigator.userAgent,
   };
+}
+
+// Ask the offscreen document to drop its sockets so the next hello carries
+// the fresh settings (the label travels in the hello).
+function notifyReconnect(): void {
+  void chrome.runtime.sendMessage({ kind: "reconnect" }).catch(() => undefined);
 }
 
 chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
@@ -73,7 +81,15 @@ chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
     return true; // la respuesta llega async desde dispatch
   }
   if (m?.kind === "ws_state") {
-    void chrome.storage.session.set({ wsState: m.state, wsPort: m.port ?? 0 });
+    // Sync on purpose: returning true/promise here drives sendResponse for
+    // the other message kinds, so no await in this listener.
+    void readWsState().then((stored) => {
+      const ports = new Set(stored.wsPorts);
+      if (m.state === "connected" && m.port !== undefined) ports.add(m.port);
+      if (m.state === "disconnected" && m.port !== undefined) ports.delete(m.port);
+      if (m.state === "probing") ports.clear();
+      void chrome.storage.session.set({ wsState: m.state, wsPort: m.port ?? 0, wsPorts: [...ports] });
+    });
     return false;
   }
   if (m?.kind === "get_hello") {
@@ -82,7 +98,11 @@ chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
     // diseño de Chrome (extensions/common/api/_api_features.json). Lo que el
     // hello necesita de ahí se responde desde aquí.
     void getSettings().then((s) =>
-      sendResponse({ token: s.token, extensionVersion: chrome.runtime.getManifest().version } satisfies HelloInfo),
+      sendResponse({
+        token: s.token,
+        extensionVersion: chrome.runtime.getManifest().version,
+        profileLabel: s.profileLabel,
+      } satisfies HelloInfo),
     );
     return true;
   }
@@ -92,7 +112,10 @@ chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
   }
   if (m?.kind === "set_settings") {
     void setSettings(m.patch).then(
-      () => sendResponse({ ok: true }),
+      () => {
+        if (m.patch.profileLabel !== undefined) notifyReconnect();
+        sendResponse({ ok: true });
+      },
       (err: unknown) => sendResponse({ ok: false, error: String(err) }),
     );
     return true;

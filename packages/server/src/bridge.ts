@@ -4,11 +4,12 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { Duplex } from "node:stream";
 import type { IncomingMessage } from "node:http";
 import { BridgeError, HEALTH_PATH, WS_PATH } from "@zcode-for-chrome/shared";
-import type { BridgeResponse, ErrorCode, Hello, HelloAck, ToolName } from "@zcode-for-chrome/shared";
+import type { BridgeResponse, ErrorCode, Hello, HelloAck, ProfileInfo, ToolName } from "@zcode-for-chrome/shared";
 import { log } from "./log.js";
 
 export const SERVER_NAME = "zcode-for-chrome";
 export const SERVER_VERSION = "0.1.0";
+export const DEFAULT_PROFILE_LABEL = "default";
 
 const HELLO_TIMEOUT_MS = 5000;
 const PING_INTERVAL_MS = 15000;
@@ -48,12 +49,16 @@ export interface BridgeOptions {
 }
 
 interface PendingCall {
+  connId: string;
   resolve: (value: unknown) => void;
   reject: (err: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
 interface ActiveConnection {
+  id: string;
+  /** Chrome profile label reported in the hello handshake. */
+  label: string;
   ws: WebSocket;
   info: ExtensionInfo;
   pingTimer: ReturnType<typeof setInterval> | null;
@@ -64,7 +69,10 @@ export class Bridge {
   private readonly opts: BridgeOptions;
   private server: http.Server | null = null;
   private wss: WebSocketServer | null = null;
-  private active: ActiveConnection | null = null;
+  /** All currently connected extensions (one per Chrome profile), by connection id. */
+  private readonly connections = new Map<string, ActiveConnection>();
+  /** Label of the profile this session targets; null = auto (single connection). */
+  private selectedLabel: string | null = null;
   private readonly pending = new Map<string, PendingCall>();
   private boundPort = 0;
   private conflict: PortConflict | null = null;
@@ -79,15 +87,66 @@ export class Bridge {
   }
 
   isConnected(): boolean {
-    return this.active !== null && this.active.ws.readyState === WebSocket.OPEN;
+    return this.openConnections().length > 0;
   }
 
   conflictInfo(): PortConflict | null {
     return this.conflict;
   }
 
-  extensionInfo(): ExtensionInfo | null {
-    return this.active ? { ...this.active.info } : null;
+  /** Every connected extension, newest handshake first. */
+  profiles(): ProfileInfo[] {
+    return [...this.connections.values()].map((conn) => ({
+      label: conn.label,
+      extensionVersion: conn.info.extensionVersion,
+      chromeVersion: conn.info.chromeVersion,
+      selected: this.selectedLabel === conn.label,
+    }));
+  }
+
+  /** Target profile for new calls; null when routing is automatic. */
+  selectedProfile(): string | null {
+    return this.selectedLabel;
+  }
+
+  /** null restores automatic routing (single connection or ambiguity error). */
+  selectProfile(label: string | null): void {
+    this.selectedLabel = label;
+  }
+
+  private openConnections(): ActiveConnection[] {
+    return [...this.connections.values()].filter((c) => c.ws.readyState === WebSocket.OPEN);
+  }
+
+  /** Resolve the connection a new request should go to. */
+  private target(): ActiveConnection {
+    const open = this.openConnections();
+    if (open.length === 0) {
+      const hint =
+        this.conflict?.otherBridge
+          ? `another zcode-for-chrome bridge${
+              this.conflict.serverVersion ? ` v${this.conflict.serverVersion}` : ""
+            } holds port ${this.conflict.port}; close that session (or kill its server) to take over`
+          : "check that the extension is loaded and the popup shows connected";
+      throw new BridgeError("EXT_NOT_CONNECTED", `no extension is connected (tool call)`, hint);
+    }
+    if (open.length === 1) return open[0];
+    if (this.selectedLabel !== null) {
+      const match = open.find((c) => c.label === this.selectedLabel);
+      if (match) return match;
+      const known = [...new Set([...this.connections.values()].map((c) => c.label))];
+      throw new BridgeError(
+        "EXT_NOT_CONNECTED",
+        `profile "${this.selectedLabel}" is not connected (tool call)`,
+        `connected profiles: ${known.join(", ") || "none"}; call select_profile to pick one`,
+      );
+    }
+    const labels = open.map((c) => c.label);
+    throw new BridgeError(
+      "EXT_NOT_CONNECTED",
+      `multiple Chrome profiles are connected (${labels.join(", ")}); select one first`,
+      "call select_profile to pick the profile for this session",
+    );
   }
 
   async start(): Promise<number> {
@@ -170,9 +229,8 @@ export class Bridge {
 
   async stop(): Promise<void> {
     this.stopped = true;
-    this.failPending("EXT_NOT_CONNECTED", "puente detenido");
-    if (this.active) this.teardown(this.active, 1001, "server stop");
-    this.active = null;
+    this.failPending("EXT_NOT_CONNECTED", "bridge stopped");
+    for (const conn of [...this.connections.values()]) this.teardown(conn, 1001, "server stop");
     const wss = this.wss;
     const server = this.server;
     this.wss = null;
@@ -186,16 +244,7 @@ export class Bridge {
   }
 
   async call<T>(tool: ToolName, params: unknown, timeoutMs: number): Promise<T> {
-    const conn = this.active;
-    if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
-      const hint =
-        this.conflict?.otherBridge
-          ? `otro puente zcode-for-chrome${
-              this.conflict.serverVersion ? ` v${this.conflict.serverVersion}` : ""
-            } ocupa el puerto ${this.conflict.port}; cierra esa sesión (o mata su servidor) para tomar el control`
-          : "comprueba que la extensión está cargada y que el popup muestra connected";
-      throw new BridgeError("EXT_NOT_CONNECTED", `la extensión no está conectada (tool ${tool})`, hint);
-    }
+    const conn = this.target();
     const id = randomUUID();
     const request = { type: "request", id, tool, params: (params ?? {}) } as const;
     return new Promise<T>((resolve, reject) => {
@@ -204,6 +253,7 @@ export class Bridge {
         reject(new BridgeError("TIMEOUT", `la extensión no respondió a ${tool} en ${timeoutMs} ms`));
       }, timeoutMs);
       this.pending.set(id, {
+        connId: conn.id,
         resolve: (value: unknown) => resolve(value as T),
         reject,
         timer,
@@ -291,30 +341,37 @@ export class Bridge {
 
   private onHello(ws: WebSocket, hello: Hello): void {
     if (this.opts.token !== undefined && hello.token !== this.opts.token) {
-      log("warn", "hello rechazado: token inválido");
+      log("warn", "hello rejected: bad token");
       ws.close(4001, "bad token");
       return;
     }
+    const label = typeof hello.profileLabel === "string" && hello.profileLabel.trim() ? hello.profileLabel.trim() : DEFAULT_PROFILE_LABEL;
     const info: ExtensionInfo = {
       extensionVersion: String(hello.extensionVersion ?? "?"),
       chromeVersion: String(hello.chromeVersion ?? "?"),
     };
-    // Un hello repetido sobre la conexión ya activa viola el protocolo (un
-    // hello por conexión): se ignora para no cerrar el propio socket.
-    if (this.active !== null && this.active.ws === ws) {
-      log("warn", "hello repetido en la conexión activa, ignorado");
-      return;
+    // A repeated hello on an already active connection violates the protocol
+    // (one hello per connection): ignore it instead of closing the socket.
+    for (const conn of this.connections.values()) {
+      if (conn.ws === ws) {
+        log("warn", "repeated hello on active connection, ignored");
+        return;
+      }
     }
-    // Solo una extensión activa: la última en hacer hello gana.
-    if (this.active) this.teardown(this.active, 4000, "replaced");
+    // A new connection with the same label is a reconnect of the same profile:
+    // replace the previous one so no orphaned entry lingers.
+    for (const conn of [...this.connections.values()]) {
+      if (conn.label === label) this.teardown(conn, 4000, "replaced");
+    }
 
-    const conn: ActiveConnection = { ws, info, pingTimer: null, pongTimer: null };
+    const id = randomUUID();
+    const conn: ActiveConnection = { id, label, ws, info, pingTimer: null, pongTimer: null };
     conn.pingTimer = setInterval(() => {
       if (conn.ws.readyState !== WebSocket.OPEN) return;
       if (conn.pongTimer) clearTimeout(conn.pongTimer);
-      // Sin pong en PONG_TIMEOUT_MS la conexión se da por muerta.
+      // No pong within PONG_TIMEOUT_MS: the connection is considered dead.
       conn.pongTimer = setTimeout(() => {
-        log("warn", "pong timeout, terminando conexión");
+        log("warn", "pong timeout, terminating connection");
         conn.ws.terminate();
       }, PONG_TIMEOUT_MS);
       conn.ws.ping();
@@ -326,22 +383,24 @@ export class Bridge {
       }
     });
     conn.ws.on("close", () => {
-      // Cualquier cierre (natural o iniciado por el servidor) desarma el
-      // keepalive: si no, cada desconexión de la extensión fuga el intervalo.
+      // Any close (natural or server-initiated) disarms the keepalive:
+      // otherwise every extension disconnect leaks the interval.
       this.clearKeepalive(conn);
-      if (this.active === conn) {
-        this.active = null;
-        this.failPending("EXT_NOT_CONNECTED", "la extensión se desconectó");
-        log("info", "extension desconectada");
+      if (this.connections.get(conn.id) === conn) {
+        this.connections.delete(conn.id);
+        this.failPendingFor(conn.id, "EXT_NOT_CONNECTED", "the extension disconnected");
+        log("info", "extension disconnected", { label: conn.label });
       }
     });
-    this.active = conn;
+    this.connections.set(id, conn);
 
-    const ack: HelloAck = { type: "hello_ack", serverVersion: SERVER_VERSION };
+    const ack: HelloAck = { type: "hello_ack", serverVersion: SERVER_VERSION, connectionId: id };
     ws.send(JSON.stringify(ack));
-    log("info", "extension conectada", {
+    log("info", "extension connected", {
+      label,
       extensionVersion: info.extensionVersion,
       chromeVersion: info.chromeVersion,
+      connections: this.connections.size,
     });
   }
 
@@ -358,11 +417,11 @@ export class Bridge {
 
   private teardown(conn: ActiveConnection, code: number, reason: string): void {
     this.clearKeepalive(conn);
+    this.connections.delete(conn.id);
     if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
       conn.ws.close(code, reason);
     }
-    if (this.active === conn) this.active = null;
-    this.failPending("EXT_NOT_CONNECTED", `conexión cerrada (${reason})`);
+    this.failPendingFor(conn.id, "EXT_NOT_CONNECTED", `connection closed (${reason})`);
   }
 
   private onResponse(msg: BridgeResponse): void {
@@ -379,6 +438,15 @@ export class Bridge {
 
   private failPending(code: ErrorCode, message: string): void {
     for (const [id, p] of this.pending) {
+      clearTimeout(p.timer);
+      this.pending.delete(id);
+      p.reject(new BridgeError(code, message));
+    }
+  }
+
+  private failPendingFor(connId: string, code: ErrorCode, message: string): void {
+    for (const [id, p] of this.pending) {
+      if (p.connId !== connId) continue;
       clearTimeout(p.timer);
       this.pending.delete(id);
       p.reject(new BridgeError(code, message));

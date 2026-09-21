@@ -31,6 +31,8 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   press_key: "Pulsa una tecla (con modificadores opcionales) por CDP",
   scroll: "Desplaza la página en una dirección o lleva un elemento al centro",
   evaluate_js: "Evalúa una expresión JS en la página vía Runtime.evaluate",
+  list_profiles: "Lista los perfiles de Chrome (extensiones) conectados al puente",
+  select_profile: "Selecciona el perfil de Chrome que usará esta sesión; \"default\" vuelve al modo automático",
 };
 
 type ToolResult = CallToolResult;
@@ -111,11 +113,18 @@ async function viaBridge(bridge: Bridge, tool: ToolName, args: unknown): Promise
 
 async function browserStatus(bridge: Bridge): Promise<ToolResult> {
   const conflict = bridge.conflictInfo();
+  const profiles = bridge.profiles();
   const base = {
     extensionConnected: bridge.isConnected(),
     port: bridge.getPort(),
     serverVersion: SERVER_VERSION,
-    ...(bridge.extensionInfo() ?? {}),
+    ...(profiles.length === 1
+      ? { extensionVersion: profiles[0].extensionVersion, chromeVersion: profiles[0].chromeVersion }
+      : {}),
+    ...(profiles.length > 1
+      ? { profiles: profiles.map(({ label, extensionVersion, chromeVersion, selected }) => ({ label, extensionVersion, chromeVersion, selected })) }
+      : {}),
+    ...(bridge.selectedProfile() !== null ? { selectedProfile: bridge.selectedProfile() } : {}),
     ...(conflict ? { conflict } : {}),
   };
   if (!bridge.isConnected()) {
@@ -131,11 +140,68 @@ async function browserStatus(bridge: Bridge): Promise<ToolResult> {
   }
 }
 
+function listProfiles(bridge: Bridge): ToolResult {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ profiles: bridge.profiles(), selected: bridge.selectedProfile() }),
+      },
+    ],
+  };
+}
+
+function selectProfile(bridge: Bridge, args: Record<string, unknown>): ToolResult {
+  const profile = typeof args.profile === "string" ? args.profile.trim() : "";
+  if (!profile) {
+    return {
+      isError: true,
+      content: [{ type: "text", text: JSON.stringify({ code: "INVALID_PARAMS", message: "profile is required" }) }],
+    };
+  }
+  // A label that matches a connected profile always wins over the "default"
+  // sentinel, so a profile literally named "default" stays selectable; the
+  // sentinel only restores automatic routing when nothing matches.
+  const matchesConnected = profile !== "default" || bridge.profiles().some((p) => p.label === "default");
+  if (matchesConnected && !bridge.profiles().some((p) => p.label === profile)) {
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: "EXT_NOT_CONNECTED",
+            message: `profile "${profile}" is not connected`,
+            hint: `connected profiles: ${bridge.profiles().map((p) => p.label).join(", ") || "none"}`,
+          }),
+        },
+      ],
+    };
+  }
+  bridge.selectProfile(matchesConnected ? profile : null);
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ ok: true, selected: bridge.selectedProfile(), profiles: bridge.profiles() }),
+      },
+    ],
+  };
+}
+
 export function registerTools(server: McpServer, bridge: Bridge): void {
   for (const tool of Object.keys(TOOL_DESCRIPTIONS) as ToolName[]) {
     const config = { description: TOOL_DESCRIPTIONS[tool], inputSchema: TOOL_SHAPES[tool] };
     if (tool === "browser_status") {
       server.registerTool(tool, config, () => browserStatus(bridge));
+      continue;
+    }
+    if (tool === "list_profiles") {
+      server.registerTool(tool, config, () => listProfiles(bridge));
+      continue;
+    }
+    if (tool === "select_profile") {
+      server.registerTool(tool, config, (args: unknown) => selectProfile(bridge, (args ?? {}) as Record<string, unknown>));
       continue;
     }
     server.registerTool(tool, config, (args: unknown) => viaBridge(bridge, tool, args));

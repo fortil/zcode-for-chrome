@@ -1,0 +1,16 @@
+{
+  "name": "@zcode-for-chrome/extension",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@zcode-for-chrome/shared": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.3.0",
+    "esbuild": "^0.28.0"
+  }
+}

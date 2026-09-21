@@ -35,6 +35,16 @@ void ensureOffscreen();
 chrome.runtime.onInstalled.addListener(() => void ensureOffscreen());
 chrome.runtime.onStartup.addListener(() => void ensureOffscreen());
 
+// The offscreen document owns the WebSocket, but nothing above restarts it if
+// Chrome reclaims it while the service worker is asleep (its own death wakes
+// nobody). A periodic alarm wakes the worker, and its top-level
+// ensureOffscreen() recreates the document if it is gone.
+const REVIVE_ALARM = "ensure-offscreen";
+chrome.alarms.create(REVIVE_ALARM, { periodInMinutes: 1 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === REVIVE_ALARM) void ensureOffscreen();
+});
+
 interface StoredWsState {
   wsState: "probing" | "connected" | "disconnected";
   wsPort: number;

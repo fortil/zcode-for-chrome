@@ -110,11 +110,13 @@ async function viaBridge(bridge: Bridge, tool: ToolName, args: unknown): Promise
 }
 
 async function browserStatus(bridge: Bridge): Promise<ToolResult> {
+  const conflict = bridge.conflictInfo();
   const base = {
     extensionConnected: bridge.isConnected(),
     port: bridge.getPort(),
     serverVersion: SERVER_VERSION,
     ...(bridge.extensionInfo() ?? {}),
+    ...(conflict ? { conflict } : {}),
   };
   if (!bridge.isConnected()) {
     return { content: [{ type: "text", text: JSON.stringify(base) }] };

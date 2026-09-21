@@ -98,6 +98,14 @@ default and controlled from the popup:
   token, the only defense is the `Origin` header, which has a known gap: any
   local process can spoof that header and connect to the bridge. Set a token
   if your machine runs code you don't trust.
+- **One bridge at a time.** The server binds the first port of the range
+  (8765) or, with `ZCODE_CHROME_PORT` set, that exact port; if the port is
+  taken by another live bridge, it waits for it to free up instead of
+  silently sliding to the next port (which used to strand the second ZCode
+  session with no extension, since the extension always picks the lowest
+  healthy port). Set `ZCODE_CHROME_ALLOW_SCAN=1` to restore the old
+  scan-the-range behavior. While waiting, `browser_status` reports the
+  `conflict` and tool errors name the port holder.
 - **Protected pages.** Page tools refuse to act on `chrome://`,
   `chrome-extension://`, `devtools:`, `about:`, `edge:`, `file:`,
   `view-source:`, and the Chrome Web Store (`PROTECTED_PAGE`), plus any host
@@ -129,8 +137,11 @@ default and controlled from the popup:
   `chrome://extensions` and there's no automated E2E from the command line.
 - CDP-based tools fail with `DEBUGGER_UNAVAILABLE` if DevTools is open on the
   target tab; close it and retry. DOM tools keep working.
-- The extension connects to a single server: if you start two ZCode
-  sessions, whichever starts last keeps the bridge.
+- The extension connects to a single server: with two ZCode sessions open,
+  the bridge belongs to the session that took the port first, and the other
+  session's tools fail with a hint naming the port holder. Closing the first
+  session (or killing its server) hands the bridge to the waiting one within
+  seconds; the running extension reconnects on its own.
 
 ## Verify
 

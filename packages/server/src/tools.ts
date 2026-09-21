@@ -159,7 +159,11 @@ function selectProfile(bridge: Bridge, args: Record<string, unknown>): ToolResul
       content: [{ type: "text", text: JSON.stringify({ code: "INVALID_PARAMS", message: "profile is required" }) }],
     };
   }
-  if (profile !== "default" && !bridge.profiles().some((p) => p.label === profile)) {
+  // A label that matches a connected profile always wins over the "default"
+  // sentinel, so a profile literally named "default" stays selectable; the
+  // sentinel only restores automatic routing when nothing matches.
+  const matchesConnected = profile !== "default" || bridge.profiles().some((p) => p.label === "default");
+  if (matchesConnected && !bridge.profiles().some((p) => p.label === profile)) {
     return {
       isError: true,
       content: [
@@ -174,7 +178,7 @@ function selectProfile(bridge: Bridge, args: Record<string, unknown>): ToolResul
       ],
     };
   }
-  bridge.selectProfile(profile === "default" ? null : profile);
+  bridge.selectProfile(matchesConnected ? profile : null);
   return {
     content: [
       {

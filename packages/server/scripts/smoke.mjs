@@ -84,7 +84,7 @@ async function connectFake(label, respond) {
         respondMsg({ ok: true, result: { enabled: true } });
         break;
       case "list_tabs":
-        respondMsg({ ok: true, result: [label === "default" ? FAKE_TAB : FAKE_TAB_B] });
+        respondMsg({ ok: true, result: [label === "profile-b" ? FAKE_TAB_B : FAKE_TAB] });
         break;
       case "screenshot":
         respondMsg({ ok: true, result: { dataUrl: `data:image/png;base64,${PNG_1X1}`, width: 1, height: 1 } });
@@ -182,7 +182,7 @@ async function main() {
   }
 
   // (6) extensión falsa correcta: hello válido + responder a los requests
-  const { ws, ack } = await connectFake("default", (respond) =>
+  const { ws, ack } = await connectFake("personal", (respond) =>
     respond({ ok: false, error: { code: "INTERNAL", message: "no implementado en la fake" } }),
   );
   if (ack.type !== "hello_ack" || typeof ack.connectionId !== "string" || ack.connectionId.length < 8) {
@@ -226,7 +226,7 @@ async function main() {
 
   let profiles = textOf(await client.callTool({ name: "list_profiles", arguments: {} }));
   const labels = (profiles.profiles ?? []).map((p) => p.label).sort();
-  if (labels.join(",") !== "default,profile-b") fail(`list_profiles devolvió ${JSON.stringify(profiles)}`);
+  if (labels.join(",") !== "personal,profile-b") fail(`list_profiles devolvió ${JSON.stringify(profiles)}`);
   if (profiles.selected !== null) fail(`sin selección, selected debería ser null: ${JSON.stringify(profiles)}`);
 
   // Dos conexiones sin selección → error de ambigüedad con hint
@@ -263,8 +263,9 @@ async function main() {
     fail(`debería quedar una sola conexión profile-b: ${JSON.stringify(profiles)}`);
   }
 
-  // "default" restaura el modo automático: con dos conexiones vuelve la
-  // ambigüedad, y al quedar una sola se enruta sin selección.
+  // "default" restaura el modo automático (no hay ningún perfil llamado
+  // "default" conectado): con dos conexiones vuelve la ambigüedad, y al
+  // quedar una sola se enruta sin selección.
   const auto = textOf(await client.callTool({ name: "select_profile", arguments: { profile: "default" } }));
   if (auto.ok !== true || auto.selected !== null) fail(`select_profile default devolvió ${JSON.stringify(auto)}`);
   wsB2.close();

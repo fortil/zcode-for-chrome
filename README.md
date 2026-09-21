@@ -106,7 +106,9 @@ extension. With several connected, `select_profile { "profile": "work" }`
 routes this session's tools to that profile (the choice lives in the session's
 server process, so two ZCode sessions can target different profiles without
 interfering). A reconnecting extension reuses its label, replacing its old
-connection instead of accumulating duplicates.
+connection instead of accumulating duplicates. `"default"` as the argument
+restores automatic routing — unless a connected profile is literally named
+`default`, in which case that profile is selected.
 
 Each ZCode session runs its own server on its own port of the range, and the
 extension opens one WebSocket per healthy server, so simultaneous sessions

@@ -11,9 +11,13 @@ const PROBE_TIMEOUT_MS = 500;
 const HELLO_ACK_TIMEOUT_MS = 5000;
 const MIN_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30000;
+// A port whose /health answered but whose WS handshake failed gets benched
+// for a while: re-picking it every round would starve the next healthy port.
+const BLOCK_AFTER_FAILED_HELLO_MS = 60_000;
 
 let backoffMs = MIN_BACKOFF_MS;
 let socket: WebSocket | null = null;
+const blockedUntil = new Map<number, number>();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -26,8 +30,10 @@ function reportState(state: "probing" | "connected" | "disconnected", port?: num
   void chrome.runtime.sendMessage(msg).catch(() => undefined);
 }
 
-// Sondea /health en todo el rango en paralelo y devuelve el primer puerto
-// con un servidor vivo, o null si no hay ninguno.
+// Sondea /health en todo el rango en paralelo y devuelve el puerto al que
+// conectarse, o null si no hay ninguno. Solo valen servidores del puente
+// (el /health lleva name) y los puertos con hello reciente fallido quedan al
+// final de la cola; solo se reintenta un puerto bloqueado si no hay otro.
 async function findServerPort(): Promise<number | null> {
   const ports: number[] = [];
   for (let p = PORT_RANGE[0]; p <= PORT_RANGE[1]; p++) ports.push(p);
@@ -38,17 +44,16 @@ async function findServerPort(): Promise<number | null> {
           signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
         });
         if (!res.ok) return null;
-        const body = (await res.json()) as { ok?: boolean };
-        return body.ok === true ? port : null;
+        const body = (await res.json()) as { ok?: boolean; name?: string };
+        return body.ok === true && body.name === "zcode-for-chrome" ? port : null;
       } catch {
         return null;
       }
     }),
   );
-  for (const port of answers) {
-    if (port !== null) return port;
-  }
-  return null;
+  const healthy = answers.filter((port): port is number => port !== null);
+  const now = Date.now();
+  return healthy.find((port) => (blockedUntil.get(port) ?? 0) <= now) ?? healthy[0] ?? null;
 }
 
 async function sendHello(ws: WebSocket): Promise<void> {
@@ -142,7 +147,14 @@ async function main(): Promise<void> {
       continue;
     }
     const { wasConnected } = await connect(port);
-    if (wasConnected) backoffMs = MIN_BACKOFF_MS;
+    if (wasConnected) {
+      backoffMs = MIN_BACKOFF_MS;
+      blockedUntil.delete(port);
+    } else {
+      // El /health respondió pero el WS no completó el saludo: servidor
+      // ajeno o roto. Lo apartamos una ronda para probar el siguiente puerto.
+      blockedUntil.set(port, Date.now() + BLOCK_AFTER_FAILED_HELLO_MS);
+    }
     await sleep(backoffMs);
     backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
   }

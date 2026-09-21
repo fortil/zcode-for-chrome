@@ -13,10 +13,24 @@ export const SERVER_VERSION = "0.1.0";
 const HELLO_TIMEOUT_MS = 5000;
 const PING_INTERVAL_MS = 15000;
 const PONG_TIMEOUT_MS = 10000;
+const PORT_RETRY_MS = 5000;
+const PORT_WAIT_LOG_MS = 60000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export interface ExtensionInfo {
   extensionVersion: string;
   chromeVersion: string;
+}
+
+/** Who holds the port we wanted, learned by probing its /health. */
+export interface PortConflict {
+  port: number;
+  /** True when the occupier answers /health as another zcode-for-chrome bridge. */
+  otherBridge: boolean;
+  serverVersion?: string;
 }
 
 export interface BridgeOptions {
@@ -24,6 +38,13 @@ export interface BridgeOptions {
   fixedPort?: number;
   token?: string;
   allowedOrigin?: string;
+  /**
+   * Legacy behavior: on EADDRINUSE slide to the next port of the range. The
+   * default is exclusive mode: one bridge at a time, because the extension
+   * picks the lowest healthy port and never re-probes while connected, so a
+   * second server on a higher port would strand its session with no extension.
+   */
+  allowScan?: boolean;
 }
 
 interface PendingCall {
@@ -46,6 +67,8 @@ export class Bridge {
   private active: ActiveConnection | null = null;
   private readonly pending = new Map<string, PendingCall>();
   private boundPort = 0;
+  private conflict: PortConflict | null = null;
+  private stopped = false;
 
   constructor(opts: BridgeOptions) {
     this.opts = opts;
@@ -59,6 +82,10 @@ export class Bridge {
     return this.active !== null && this.active.ws.readyState === WebSocket.OPEN;
   }
 
+  conflictInfo(): PortConflict | null {
+    return this.conflict;
+  }
+
   extensionInfo(): ExtensionInfo | null {
     return this.active ? { ...this.active.info } : null;
   }
@@ -69,31 +96,64 @@ export class Bridge {
     this.server = http.createServer((req, res) => this.onRequest(req, res));
     this.server.on("upgrade", (req, socket, head) => this.onUpgrade(req, socket, head));
 
-    const candidates: number[] = [];
-    if (this.opts.fixedPort !== undefined) {
-      candidates.push(this.opts.fixedPort);
-    } else {
-      for (let p = this.opts.portRange[0]; p <= this.opts.portRange[1]; p++) candidates.push(p);
-    }
+    const scan = this.opts.allowScan === true && this.opts.fixedPort === undefined;
+    const first = this.opts.fixedPort ?? this.opts.portRange[0];
+    const last = scan ? this.opts.portRange[1] : first;
 
     let lastError: unknown = null;
-    for (const port of candidates) {
-      try {
-        await this.listen(port);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException)?.code === "EADDRINUSE") {
+    let lastWaitLog = 0;
+    for (let port = first; port <= last; port++) {
+      while (!this.stopped) {
+        try {
+          await this.listen(port);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code !== "EADDRINUSE") throw err;
           lastError = err;
+          if (scan) break;
+          // Exclusive mode: the port is ours or nobody's. Wait for the
+          // holder to go away instead of stranding this session on another
+          // port the extension will never pick.
+          this.conflict = await this.probeConflict(port);
+          const now = Date.now();
+          if (now - lastWaitLog >= PORT_WAIT_LOG_MS) {
+            lastWaitLog = now;
+            log("warn", "port busy, waiting for it to free up", {
+              port,
+              otherBridge: this.conflict.otherBridge,
+              ...(this.conflict.serverVersion ? { serverVersion: this.conflict.serverVersion } : {}),
+            });
+          }
+          await sleep(PORT_RETRY_MS);
           continue;
         }
-        throw err;
+        this.boundPort = port;
+        this.conflict = null;
+        // A partir de aquí los errores del server no deben tumbar el proceso.
+        this.server.on("error", (err) => log("error", "http server error", { err: String(err) }));
+        log("info", "bridge listening", { port });
+        return port;
       }
-      this.boundPort = port;
-      // A partir de aquí los errores del server no deben tumbar el proceso.
-      this.server.on("error", (err) => log("error", "http server error", { err: String(err) }));
-      log("info", "bridge listening", { port });
-      return port;
+      if (this.stopped) break;
     }
     throw lastError ?? new Error("no hay puertos disponibles en el rango");
+  }
+
+  // Ask the port holder whether it is another bridge, so hints and logs can
+  // say "close that other session" instead of a bare EADDRINUSE.
+  private async probeConflict(port: number): Promise<PortConflict> {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500) });
+      if (!res.ok) return { port, otherBridge: false };
+      const body = (await res.json()) as { name?: unknown; version?: unknown };
+      if (body.name !== SERVER_NAME) return { port, otherBridge: false };
+      return {
+        port,
+        otherBridge: true,
+        serverVersion: typeof body.version === "string" ? body.version : undefined,
+      };
+    } catch {
+      return { port, otherBridge: false };
+    }
   }
 
   private listen(port: number): Promise<void> {
@@ -109,6 +169,7 @@ export class Bridge {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     this.failPending("EXT_NOT_CONNECTED", "puente detenido");
     if (this.active) this.teardown(this.active, 1001, "server stop");
     this.active = null;
@@ -127,11 +188,13 @@ export class Bridge {
   async call<T>(tool: ToolName, params: unknown, timeoutMs: number): Promise<T> {
     const conn = this.active;
     if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
-      throw new BridgeError(
-        "EXT_NOT_CONNECTED",
-        `la extensión no está conectada (tool ${tool})`,
-        "comprueba que la extensión está cargada y que el popup muestra connected",
-      );
+      const hint =
+        this.conflict?.otherBridge
+          ? `otro puente zcode-for-chrome${
+              this.conflict.serverVersion ? ` v${this.conflict.serverVersion}` : ""
+            } ocupa el puerto ${this.conflict.port}; cierra esa sesión (o mata su servidor) para tomar el control`
+          : "comprueba que la extensión está cargada y que el popup muestra connected";
+      throw new BridgeError("EXT_NOT_CONNECTED", `la extensión no está conectada (tool ${tool})`, hint);
     }
     const id = randomUUID();
     const request = { type: "request", id, tool, params: (params ?? {}) } as const;

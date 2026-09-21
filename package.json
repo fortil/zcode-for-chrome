@@ -1,0 +1,21 @@
+{
+  "name": "zcode-for-chrome",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/extension"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/shared && npm run build -w packages/server && npm run build -w packages/extension",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "smoke": "node packages/server/scripts/smoke.mjs",
+    "smoke:live": "node packages/server/scripts/smoke.mjs --live",
+    "clean": "rm -rf packages/*/dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

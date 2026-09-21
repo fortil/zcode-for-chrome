@@ -14,12 +14,6 @@ export const DEFAULT_PROFILE_LABEL = "default";
 const HELLO_TIMEOUT_MS = 5000;
 const PING_INTERVAL_MS = 15000;
 const PONG_TIMEOUT_MS = 10000;
-const PORT_RETRY_MS = 5000;
-const PORT_WAIT_LOG_MS = 60000;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export interface ExtensionInfo {
   extensionVersion: string;
@@ -36,16 +30,10 @@ export interface PortConflict {
 
 export interface BridgeOptions {
   portRange: [number, number];
+  /** Bind exactly this port; by default the first free port of the range is used. */
   fixedPort?: number;
   token?: string;
   allowedOrigin?: string;
-  /**
-   * Legacy behavior: on EADDRINUSE slide to the next port of the range. The
-   * default is exclusive mode: one bridge at a time, because the extension
-   * picks the lowest healthy port and never re-probes while connected, so a
-   * second server on a higher port would strand its session with no extension.
-   */
-  allowScan?: boolean;
 }
 
 interface PendingCall {
@@ -155,44 +143,39 @@ export class Bridge {
     this.server = http.createServer((req, res) => this.onRequest(req, res));
     this.server.on("upgrade", (req, socket, head) => this.onUpgrade(req, socket, head));
 
-    const scan = this.opts.allowScan === true && this.opts.fixedPort === undefined;
+    // A fixed port is exact: the operator asked for it. Otherwise take the
+    // first free port of the range. Sliding used to strand sessions because
+    // the extension only ever picked the lowest healthy port; since the
+    // extension opens a WebSocket to every healthy bridge in the range
+    // (multiple Chrome profiles, multiple concurrent sessions), a later port
+    // is just as good as the first one.
     const first = this.opts.fixedPort ?? this.opts.portRange[0];
-    const last = scan ? this.opts.portRange[1] : first;
+    const last = this.opts.fixedPort ?? this.opts.portRange[1];
 
     let lastError: unknown = null;
-    let lastWaitLog = 0;
     for (let port = first; port <= last; port++) {
-      while (!this.stopped) {
-        try {
-          await this.listen(port);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException)?.code !== "EADDRINUSE") throw err;
-          lastError = err;
-          if (scan) break;
-          // Exclusive mode: the port is ours or nobody's. Wait for the
-          // holder to go away instead of stranding this session on another
-          // port the extension will never pick.
-          this.conflict = await this.probeConflict(port);
-          const now = Date.now();
-          if (now - lastWaitLog >= PORT_WAIT_LOG_MS) {
-            lastWaitLog = now;
-            log("warn", "port busy, waiting for it to free up", {
-              port,
-              otherBridge: this.conflict.otherBridge,
-              ...(this.conflict.serverVersion ? { serverVersion: this.conflict.serverVersion } : {}),
-            });
-          }
-          await sleep(PORT_RETRY_MS);
-          continue;
-        }
-        this.boundPort = port;
-        this.conflict = null;
-        // A partir de aquí los errores del server no deben tumbar el proceso.
-        this.server.on("error", (err) => log("error", "http server error", { err: String(err) }));
-        log("info", "bridge listening", { port });
-        return port;
-      }
       if (this.stopped) break;
+      try {
+        await this.listen(port);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== "EADDRINUSE") throw err;
+        lastError = err;
+        // Record who holds the port so hints and browser_status can say
+        // "another bridge session is using it" instead of a bare EADDRINUSE.
+        this.conflict = await this.probeConflict(port);
+        log("warn", "port busy, trying the next one", {
+          port,
+          otherBridge: this.conflict.otherBridge,
+          ...(this.conflict.serverVersion ? { serverVersion: this.conflict.serverVersion } : {}),
+        });
+        continue;
+      }
+      this.boundPort = port;
+      this.conflict = null;
+      // A partir de aquí los errores del server no deben tumbar el proceso.
+      this.server.on("error", (err) => log("error", "http server error", { err: String(err) }));
+      log("info", "bridge listening", { port });
+      return port;
     }
     throw lastError ?? new Error("no hay puertos disponibles en el rango");
   }

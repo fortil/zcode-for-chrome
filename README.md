@@ -127,14 +127,12 @@ default and controlled from the popup:
   token, the only defense is the `Origin` header, which has a known gap: any
   local process can spoof that header and connect to the bridge. Set a token
   if your machine runs code you don't trust.
-- **One bridge server per session.** The server binds the first port of the
-  range (8765) or, with `ZCODE_CHROME_PORT` set, that exact port; if the port
-  is taken by another live bridge, it waits for it to free up instead of
-  silently sliding to the next port. Set `ZCODE_CHROME_ALLOW_SCAN=1` to
-  restore the old scan-the-range behavior. While waiting, `browser_status`
-  reports the `conflict` and tool errors name the port holder. The extension
-  itself opens a WebSocket to every healthy bridge server in the range, so
-  concurrent ZCode sessions each talk to their own server (see
+- **One bridge server per session.** The server binds the first free port of
+  the range (8765 and up); with `ZCODE_CHROME_PORT` set it binds exactly that
+  port and fails if it is taken. If another live bridge already holds a port,
+  the server slides to the next free one — the extension opens a WebSocket to
+  every healthy bridge in the range, so concurrent ZCode sessions each talk
+  to their own server (see
   [Multiple Chrome profiles](#multiple-chrome-profiles)).
 - **Protected pages.** Page tools refuse to act on `chrome://`,
   `chrome-extension://`, `devtools:`, `about:`, `edge:`, `file:`,

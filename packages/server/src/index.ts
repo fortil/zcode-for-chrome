@@ -11,7 +11,6 @@ async function main(): Promise<void> {
     fixedPort: Number(process.env.ZCODE_CHROME_PORT) || undefined,
     token: process.env.ZCODE_CHROME_TOKEN,
     allowedOrigin: process.env.ZCODE_CHROME_ALLOWED_ORIGIN,
-    allowScan: process.env.ZCODE_CHROME_ALLOW_SCAN === "1",
   });
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
   registerTools(server, bridge);
@@ -31,10 +30,10 @@ async function main(): Promise<void> {
 
   const transport = new StdioServerTransport();
   transport.onclose = () => shutdown("transport closed");
-  // MCP handshake first: if the bridge port is taken by another live session,
-  // exclusive mode makes start() wait for it, and that must not look like a
-  // dead MCP server. Tool calls while waiting fail with a hint that names the
-  // port holder.
+  // MCP handshake first: start() is fast (first free port of the range), but
+  // a fixed-port env var could still make it fail, and that must not look
+  // like a dead MCP server. Tool calls before the bridge is up fail with a
+  // hint that names the port holder.
   await server.connect(transport);
 
   void bridge.start().then(

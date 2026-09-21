@@ -1,0 +1,14 @@
+{
+  "mcp": {
+    "servers": {
+      "zcode-for-chrome": {
+        "type": "stdio",
+        "command": "node",
+        "args": ["<ABSOLUTE_PATH_TO_REPO>/packages/server/dist/index.js"],
+        "env": {
+          "ZCODE_CHROME_TOKEN": "<OPTIONAL_SHARED_TOKEN>"
+        }
+      }
+    }
+  }
+}

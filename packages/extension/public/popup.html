@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <title>ZCode for Chrome</title>
+    <style>
+      body {
+        width: 320px;
+        margin: 12px;
+        font: 13px/1.45 system-ui, sans-serif;
+      }
+      h1 {
+        font-size: 15px;
+        margin: 0 0 8px;
+      }
+      h2 {
+        font-size: 13px;
+        margin: 14px 0 4px;
+      }
+      label {
+        display: block;
+        margin: 6px 0;
+      }
+      input[type="text"],
+      textarea {
+        width: 100%;
+        box-sizing: border-box;
+      }
+      ul {
+        margin: 4px 0 0;
+        padding-left: 18px;
+        max-height: 140px;
+        overflow-y: auto;
+      }
+      .muted {
+        color: #555;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ZCode for Chrome</h1>
+    <p id="ws-state" class="muted">...</p>
+    <label><input type="checkbox" id="enabled" checked /> Extensión activada</label>
+    <label><input type="checkbox" id="allow-eval" checked /> Permitir evaluate_js</label>
+    <label>Token compartido <input type="text" id="token" placeholder="vacío = modo confiado" /></label>
+    <label>Hosts bloqueados (uno por línea) <textarea id="blocked-hosts" rows="3"></textarea></label>
+    <h2>Últimas acciones</h2>
+    <ul id="actions"></ul>
+    <script src="popup.js"></script>
+  </body>
+</html>

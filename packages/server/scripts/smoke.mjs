@@ -269,8 +269,21 @@ async function main() {
   const auto = textOf(await client.callTool({ name: "select_profile", arguments: { profile: "default" } }));
   if (auto.ok !== true || auto.selected !== null) fail(`select_profile default devolvió ${JSON.stringify(auto)}`);
   wsB2.close();
-  const tabsA = textOf(await client.callTool({ name: "list_tabs", arguments: {} }));
-  if (tabsA[0]?.tabId !== FAKE_TAB.tabId) fail(`con una sola conexión, list_tabs devolvió ${JSON.stringify(tabsA)}`);
+  // El cierre del socket viaja async: esperar a que el registro quede con una
+  // sola conexión antes de asertar el enrutado automático.
+  let tabsA = null;
+  const settleDeadline = Date.now() + 5000;
+  while (Date.now() < settleDeadline) {
+    profiles = textOf(await client.callTool({ name: "list_profiles", arguments: {} }));
+    if ((profiles.profiles ?? []).length === 1) {
+      tabsA = textOf(await client.callTool({ name: "list_tabs", arguments: {} }));
+      break;
+    }
+    await sleep(100);
+  }
+  if (!tabsA || tabsA[0]?.tabId !== FAKE_TAB.tabId) {
+    fail(`con una sola conexión, list_tabs devolvió ${JSON.stringify(tabsA)}`);
+  }
 
   // (8) el proceso hijo muere solo al cerrar stdin, en ≤3 s
   const pid = transport._process?.pid;

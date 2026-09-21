@@ -159,6 +159,13 @@ const bases = {
     expression: z.string().min(1).describe("Expresión JS a evaluar en la página"),
     awaitPromise: z.boolean().optional().default(true).describe("Espera promesas devueltas"),
   }),
+  list_profiles: z.object({}),
+  select_profile: z.object({
+    profile: z
+      .string()
+      .min(1)
+      .describe('Etiqueta del perfil a usar para esta sesión (ver list_profiles); "default" vuelve al modo automático'),
+  }),
 } satisfies Record<ToolName, z.ZodType>;
 
 type Refinements = Partial<

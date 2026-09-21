@@ -18,8 +18,10 @@ const EXPECTED_TOOLS = [
   "navigate", "wait_for", "get_page_content", "snapshot", "query_selector",
   "screenshot", "click", "click_at", "hover", "fill", "select_option",
   "type_text", "press_key", "scroll", "evaluate_js",
+  "list_profiles", "select_profile",
 ];
 const FAKE_TAB = { tabId: 1, windowId: 1, title: "Fake", url: "https://example.com/", active: true, protected: false };
+const FAKE_TAB_B = { tabId: 2, windowId: 1, title: "Fake B", url: "https://b.example.com/", active: true, protected: false };
 
 let transport = null;
 
@@ -56,6 +58,47 @@ function textOf(result) {
   const block = result.content?.find((c) => c.type === "text");
   if (!block) fail(`respuesta sin bloque de texto: ${JSON.stringify(result)}`);
   return JSON.parse(block.text);
+}
+
+// Opens a fake extension socket, performs the hello handshake and wires a
+// minimal request handler. `label` identifies the simulated Chrome profile;
+// list_tabs answers with a per-label tab so routing assertions can tell the
+// profiles apart.
+async function connectFake(label, respond) {
+  const ws = await wsOpen("chrome-extension://smokefake");
+  const ack = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("no llegó hello_ack en 5 s")), 5000);
+    ws.on("message", (data) => {
+      const msg = JSON.parse(String(data));
+      if (msg.type === "hello_ack") { clearTimeout(timer); resolve(msg); }
+    });
+    ws.on("close", (code) => reject(new Error(`cerrado antes de hello_ack (${code})`)));
+    ws.send(JSON.stringify({ type: "hello", token: TOKEN, extensionVersion: "0.1.0-smoke", chromeVersion: "153.0.0.0", profileLabel: label }));
+  });
+  ws.on("message", (data) => {
+    const msg = JSON.parse(String(data));
+    if (msg.type !== "request") return;
+    const respondMsg = (payload) => ws.send(JSON.stringify({ type: "response", responseTo: msg.id, ...payload }));
+    switch (msg.tool) {
+      case "browser_status":
+        respondMsg({ ok: true, result: { enabled: true } });
+        break;
+      case "list_tabs":
+        respondMsg({ ok: true, result: [label === "default" ? FAKE_TAB : FAKE_TAB_B] });
+        break;
+      case "screenshot":
+        respondMsg({ ok: true, result: { dataUrl: `data:image/png;base64,${PNG_1X1}`, width: 1, height: 1 } });
+        break;
+      case "click":
+        respondMsg({ ok: false, error: { code: "ELEMENT_NOT_FOUND", message: "x" } });
+        break;
+      case "wait_for":
+        break; // sin respuesta: prueba el TIMEOUT del servidor
+      default:
+        respond(respondMsg);
+    }
+  });
+  return { ws, ack };
 }
 
 // APIs chrome.* que Chromium expone en el contexto offscreen_extension, según
@@ -108,7 +151,7 @@ async function main() {
 
   // (2) tools/list con los 20 nombres exactos
   const { tools } = await client.listTools();
-  if (tools.length !== 20) fail(`tools/list devolvió ${tools.length} tools, esperaba 20`);
+  if (tools.length !== 22) fail(`tools/list devolvió ${tools.length} tools, esperaba 22`);
   const names = new Set(tools.map((t) => t.name));
   for (const expected of EXPECTED_TOOLS) {
     if (!names.has(expected)) fail(`falta la tool "${expected}"`);
@@ -139,40 +182,12 @@ async function main() {
   }
 
   // (6) extensión falsa correcta: hello válido + responder a los requests
-  const ws = await wsOpen("chrome-extension://smokefake");
-  const ack = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("no llegó hello_ack en 5 s")), 5000);
-    ws.on("message", (data) => {
-      const msg = JSON.parse(String(data));
-      if (msg.type === "hello_ack") { clearTimeout(timer); resolve(msg); }
-    });
-    ws.send(JSON.stringify({ type: "hello", token: TOKEN, extensionVersion: "0.1.0-smoke", chromeVersion: "153.0.0.0" }));
-  });
-  if (ack.type !== "hello_ack") fail(`esperaba hello_ack, llegó ${JSON.stringify(ack)}`);
-
-  ws.on("message", (data) => {
-    const msg = JSON.parse(String(data));
-    if (msg.type !== "request") return;
-    const respond = (payload) => ws.send(JSON.stringify({ type: "response", responseTo: msg.id, ...payload }));
-    switch (msg.tool) {
-      case "browser_status":
-        respond({ ok: true, result: { enabled: true } });
-        break;
-      case "list_tabs":
-        respond({ ok: true, result: [FAKE_TAB] });
-        break;
-      case "screenshot":
-        respond({ ok: true, result: { dataUrl: `data:image/png;base64,${PNG_1X1}`, width: 1, height: 1 } });
-        break;
-      case "click":
-        respond({ ok: false, error: { code: "ELEMENT_NOT_FOUND", message: "x" } });
-        break;
-      case "wait_for":
-        break; // sin respuesta: prueba el TIMEOUT del servidor
-      default:
-        respond({ ok: false, error: { code: "INTERNAL", message: `no implementado en la fake: ${msg.tool}` } });
-    }
-  });
+  const { ws, ack } = await connectFake("default", (respond) =>
+    respond({ ok: false, error: { code: "INTERNAL", message: "no implementado en la fake" } }),
+  );
+  if (ack.type !== "hello_ack" || typeof ack.connectionId !== "string" || ack.connectionId.length < 8) {
+    fail(`hello_ack sin connectionId: ${JSON.stringify(ack)}`);
+  }
 
   // (7) asserts de extremo a extremo
   status = textOf(await client.callTool({ name: "browser_status", arguments: {} }));
@@ -203,6 +218,58 @@ async function main() {
   const waitErr = textOf(waitRes);
   if (waitErr.code !== "TIMEOUT") fail(`wait_for devolvió código ${waitErr.code}`);
   if (elapsed >= 8000) fail(`wait_for con timeoutMs 1000 tardó ${elapsed} ms`);
+
+  // (7b) segundo perfil falso: registro, ambigüedad y enrutado por etiqueta
+  const { ws: wsB } = await connectFake("profile-b", (respond) =>
+    respond({ ok: false, error: { code: "INTERNAL", message: "no implementado en la fake" } }),
+  );
+
+  let profiles = textOf(await client.callTool({ name: "list_profiles", arguments: {} }));
+  const labels = (profiles.profiles ?? []).map((p) => p.label).sort();
+  if (labels.join(",") !== "default,profile-b") fail(`list_profiles devolvió ${JSON.stringify(profiles)}`);
+  if (profiles.selected !== null) fail(`sin selección, selected debería ser null: ${JSON.stringify(profiles)}`);
+
+  // Dos conexiones sin selección → error de ambigüedad con hint
+  const amb = await client.callTool({ name: "list_tabs", arguments: {} });
+  if (amb.isError !== true) fail("list_tabs con dos perfiles y sin selección debería fallar");
+  const ambErr = textOf(amb);
+  if (!/multiple Chrome profiles/.test(ambErr.message)) fail(`ambigüedad inesperada: ${JSON.stringify(ambErr)}`);
+
+  // Selección de un perfil inexistente → error que lista los conectados
+  const bad = await client.callTool({ name: "select_profile", arguments: { profile: "nope" } });
+  if (bad.isError !== true) fail("select_profile con etiqueta inexistente debería fallar");
+  if (!/profile-b/.test(String(textOf(bad).hint ?? ""))) fail(`el hint debería listar perfiles: ${JSON.stringify(textOf(bad))}`);
+
+  // select_profile enruta las tools a la conexión elegida
+  const sel = textOf(await client.callTool({ name: "select_profile", arguments: { profile: "profile-b" } }));
+  if (sel.ok !== true || sel.selected !== "profile-b") fail(`select_profile devolvió ${JSON.stringify(sel)}`);
+  const tabsB = textOf(await client.callTool({ name: "list_tabs", arguments: {} }));
+  if (tabsB[0]?.tabId !== FAKE_TAB_B.tabId) fail(`con profile-b, list_tabs devolvió ${JSON.stringify(tabsB)}`);
+
+  // Reconexión con la misma etiqueta reemplaza a la anterior (no quedan dos)
+  const { ws: wsB2, ack: ackB2 } = await connectFake("profile-b", (respond) =>
+    respond({ ok: false, error: { code: "INTERNAL", message: "no implementado en la fake" } }),
+  );
+  if (ackB2.connectionId === ack.connectionId) fail("connectionIds no deberían repetirse entre conexiones");
+  const replaced = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), 5000);
+    wsB.on("close", (code) => { clearTimeout(timer); resolve(code); });
+  });
+  if (replaced !== 4000) fail(`la conexión reemplazada debería cerrar con 4000, llegó ${replaced}`);
+  const tabsB2 = textOf(await client.callTool({ name: "list_tabs", arguments: {} }));
+  if (tabsB2[0]?.tabId !== FAKE_TAB_B.tabId) fail(`tras reemplazo, list_tabs devolvió ${JSON.stringify(tabsB2)}`);
+  profiles = textOf(await client.callTool({ name: "list_profiles", arguments: {} }));
+  if ((profiles.profiles ?? []).filter((p) => p.label === "profile-b").length !== 1) {
+    fail(`debería quedar una sola conexión profile-b: ${JSON.stringify(profiles)}`);
+  }
+
+  // "default" restaura el modo automático: con dos conexiones vuelve la
+  // ambigüedad, y al quedar una sola se enruta sin selección.
+  const auto = textOf(await client.callTool({ name: "select_profile", arguments: { profile: "default" } }));
+  if (auto.ok !== true || auto.selected !== null) fail(`select_profile default devolvió ${JSON.stringify(auto)}`);
+  wsB2.close();
+  const tabsA = textOf(await client.callTool({ name: "list_tabs", arguments: {} }));
+  if (tabsA[0]?.tabId !== FAKE_TAB.tabId) fail(`con una sola conexión, list_tabs devolvió ${JSON.stringify(tabsA)}`);
 
   // (8) el proceso hijo muere solo al cerrar stdin, en ≤3 s
   const pid = transport._process?.pid;

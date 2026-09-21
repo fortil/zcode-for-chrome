@@ -43,10 +43,18 @@ async function browserStatus(): Promise<unknown> {
   };
 }
 
+// Handled by the MCP server itself (profile routing lives there); they only
+// exist in this map to satisfy the exhaustive ToolName record.
+function serverSideTool(): Promise<unknown> {
+  return Promise.reject(new BridgeError("INVALID_PARAMS", "this tool is handled by the server"));
+}
+
 // Las 20 tools llegan por spread desde su mapa de handlers: una clave
 // explícita aquí pisaría al handler real.
 export const HANDLERS: Record<ToolName, Handler> = {
   browser_status: browserStatus,
+  list_profiles: serverSideTool,
+  select_profile: serverSideTool,
   ...TAB_HANDLERS,
   ...DOM_HANDLERS,
   ...INPUT_HANDLERS,

@@ -56,7 +56,7 @@ toggles described below.
 
 ## Tools
 
-The 20 tools ZCode sees through the server. `tabId` is optional wherever it
+The 22 tools ZCode sees through the server. `tabId` is optional wherever it
 appears: omit it and the tool acts on the active tab of the most recently
 focused window. Action tools accept `ref` or `selector`; refs like `e1, e2,
 e3...` come from `snapshot` or `query_selector` and expire once the page
@@ -84,6 +84,33 @@ navigates (`STALE_REF` error: take a new snapshot).
 | `press_key` | `tabId?`, `key`, `modifiers?` | Presses a key with trusted events (Enter actually submits forms) |
 | `scroll` | `tabId?`, `direction?`, `amount?`, `ref?`, `selector?` | Scrolls the page in a direction, or centers an element |
 | `evaluate_js` | `tabId?`, `expression`, `awaitPromise?` | Evaluates a JS expression via `Runtime.evaluate`, bypassing the page's CSP |
+| `list_profiles` | (none) | Lists the Chrome profiles (extensions) connected to the bridge, with their labels and which one is selected |
+| `select_profile` | `profile` | Targets this session's tools at the given profile label; `"default"` restores automatic routing |
+
+## Multiple Chrome profiles
+
+Install the extension in as many Chrome profiles as you want (work, personal,
+...) and give each one a **profile label** in the popup (empty means
+`default`). Every labeled extension connects to the bridge, and `list_profiles`
+shows them all:
+
+```json
+{ "profiles": [
+  { "label": "default", "extensionVersion": "0.1.0", "chromeVersion": "...", "selected": false },
+  { "label": "work", "extensionVersion": "0.1.0", "chromeVersion": "...", "selected": false }
+] }
+```
+
+With a single connection everything works as before: tools go to the only
+extension. With several connected, `select_profile { "profile": "work" }`
+routes this session's tools to that profile (the choice lives in the session's
+server process, so two ZCode sessions can target different profiles without
+interfering). A reconnecting extension reuses its label, replacing its old
+connection instead of accumulating duplicates.
+
+Each ZCode session runs its own server on its own port of the range, and the
+extension opens one WebSocket per healthy server, so simultaneous sessions
+don't compete for the browser.
 
 ## Security model
 
@@ -98,14 +125,15 @@ default and controlled from the popup:
   token, the only defense is the `Origin` header, which has a known gap: any
   local process can spoof that header and connect to the bridge. Set a token
   if your machine runs code you don't trust.
-- **One bridge at a time.** The server binds the first port of the range
-  (8765) or, with `ZCODE_CHROME_PORT` set, that exact port; if the port is
-  taken by another live bridge, it waits for it to free up instead of
-  silently sliding to the next port (which used to strand the second ZCode
-  session with no extension, since the extension always picks the lowest
-  healthy port). Set `ZCODE_CHROME_ALLOW_SCAN=1` to restore the old
-  scan-the-range behavior. While waiting, `browser_status` reports the
-  `conflict` and tool errors name the port holder.
+- **One bridge server per session.** The server binds the first port of the
+  range (8765) or, with `ZCODE_CHROME_PORT` set, that exact port; if the port
+  is taken by another live bridge, it waits for it to free up instead of
+  silently sliding to the next port. Set `ZCODE_CHROME_ALLOW_SCAN=1` to
+  restore the old scan-the-range behavior. While waiting, `browser_status`
+  reports the `conflict` and tool errors name the port holder. The extension
+  itself opens a WebSocket to every healthy bridge server in the range, so
+  concurrent ZCode sessions each talk to their own server (see
+  [Multiple Chrome profiles](#multiple-chrome-profiles)).
 - **Protected pages.** Page tools refuse to act on `chrome://`,
   `chrome-extension://`, `devtools:`, `about:`, `edge:`, `file:`,
   `view-source:`, and the Chrome Web Store (`PROTECTED_PAGE`), plus any host

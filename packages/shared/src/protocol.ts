@@ -18,7 +18,9 @@ export type ToolName =
   | "type_text"
   | "press_key"
   | "scroll"
-  | "evaluate_js";
+  | "evaluate_js"
+  | "list_profiles"
+  | "select_profile";
 
 export type ErrorCode =
   | "EXT_NOT_CONNECTED"
@@ -41,11 +43,26 @@ export interface Hello {
   token?: string;
   extensionVersion: string;
   chromeVersion: string;
+  /** Label identifying the Chrome profile this extension runs on. */
+  profileLabel: string;
 }
 
 export interface HelloAck {
   type: "hello_ack";
   serverVersion: string;
+  /** Server-assigned id for this WebSocket connection. */
+  connectionId: string;
+}
+
+/** One connected extension (a Chrome profile) as reported by list_profiles. */
+export interface ProfileInfo extends ExtensionInfoBase {
+  label: string;
+  selected: boolean;
+}
+
+interface ExtensionInfoBase {
+  extensionVersion: string;
+  chromeVersion: string;
 }
 
 export interface BridgeRequest {

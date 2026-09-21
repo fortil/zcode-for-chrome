@@ -3,6 +3,8 @@ import { detachAll } from "./cdp.js";
 export interface Settings {
   enabled: boolean;
   token: string;
+  /** Label identifying this Chrome profile to the bridge (see list_profiles). */
+  profileLabel: string;
   blockedHosts: string[];
   allowEvaluateJs: boolean;
 }
@@ -10,6 +12,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   enabled: true,
   token: "",
+  profileLabel: "default",
   blockedHosts: [],
   allowEvaluateJs: true,
 };
@@ -21,6 +24,10 @@ export async function getSettings(): Promise<Settings> {
   return {
     enabled: typeof stored.enabled === "boolean" ? stored.enabled : DEFAULT_SETTINGS.enabled,
     token: typeof stored.token === "string" ? stored.token : DEFAULT_SETTINGS.token,
+    profileLabel:
+      typeof stored.profileLabel === "string" && stored.profileLabel.trim() !== ""
+        ? stored.profileLabel.trim()
+        : DEFAULT_SETTINGS.profileLabel,
     blockedHosts: Array.isArray(stored.blockedHosts)
       ? stored.blockedHosts.filter((host): host is string => typeof host === "string")
       : DEFAULT_SETTINGS.blockedHosts,

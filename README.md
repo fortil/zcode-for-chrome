@@ -1,5 +1,14 @@
 # ZCode for Chrome
 
+<p align="center">
+  <a href="https://github.com/fortil/zcode-for-chrome"><img src="https://img.shields.io/badge/github-fortil%2Fzcode--for--chrome-181717?logo=github" alt="github.com/fortil/zcode-for-chrome"></a>
+  <img src="https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white" alt="TypeScript 5.9">
+  <img src="https://img.shields.io/badge/MCP-server-5F45AF" alt="MCP server">
+  <img src="https://img.shields.io/badge/Chrome-extension%20MV3-4285F4?logo=googlechrome&logoColor=white" alt="Chrome extension, Manifest V3">
+  <img src="https://img.shields.io/badge/Node.js-22%2B-5FA04E?logo=nodedotjs&logoColor=white" alt="Node.js 22+">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="license MIT">
+</p>
+
 A Chrome extension (MV3) plus an MCP server that give ZCode control of your
 real browser: tabs, page reading, snapshots with stable references, clicks,
 form filling, keyboard input, scrolling, screenshots, and JavaScript
@@ -114,6 +123,43 @@ Each ZCode session runs its own server on its own port of the range, and the
 extension opens one WebSocket per healthy server, so simultaneous sessions
 don't compete for the browser.
 
+## HTTP mode
+
+Some MCP clients only speak Streamable HTTP and cannot launch a stdio process
+(Open WebUI is one). Set `ZCODE_CHROME_HTTP_PORT` and the server answers MCP at
+`POST /mcp` on that port. In this mode it ignores stdin and runs until it gets
+SIGTERM or SIGINT, so it can live under launchd or systemd.
+
+```
+ZCODE_CHROME_HTTP_PORT=8799 \
+ZCODE_CHROME_HTTP_TOKEN=<long random string> \
+ZCODE_CHROME_TOOLS=browser_status,list_tabs,new_tab,close_tab,navigate,wait_for,get_page_content \
+node packages/server/dist/index.js
+```
+
+| Variable | Meaning |
+| --- | --- |
+| `ZCODE_CHROME_HTTP_PORT` | Port of the MCP endpoint. Setting it turns HTTP mode on |
+| `ZCODE_CHROME_HTTP_TOKEN` | Required in HTTP mode, at least 16 characters. Clients send it as `Authorization: Bearer <token>`; without it every path answers 401. The server exits at startup if it is missing or shorter |
+| `ZCODE_CHROME_HTTP_HOST` | Bind address, `127.0.0.1` by default. On any other address the token travels in clear text and the server logs a warning |
+| `ZCODE_CHROME_TOOLS` | Comma-separated list of the tools to expose, in both modes. Unset exposes all 22. An unknown name, or a value with no names, stops the server at startup |
+
+- The endpoint is stateless: there are no MCP sessions, so a client keeps
+  working after the server restarts. `GET` and `DELETE` on `/mcp` answer 405.
+- Every HTTP client shares one bridge, so `select_profile` changes the profile
+  for all clients of that server.
+- `ZCODE_CHROME_HTTP_TOKEN` is separate from `ZCODE_CHROME_TOKEN`, which
+  authenticates the extension to the bridge.
+- Leave `ZCODE_CHROME_PORT` unset for a service. A fixed bridge port that is
+  already taken (a stdio session got there first) makes the server exit, and
+  a service manager would restart it in a loop.
+- A client that drops the connection or cancels does not stop a browser
+  action already sent to the extension; it finishes or hits its timeout.
+- A model that reads web pages can be steered by what a page says. For a chat
+  UI, connect a Chrome profile with no logged-in sessions, and use
+  `ZCODE_CHROME_TOOLS` to leave out `evaluate_js` and the input tools if the
+  model only needs to read.
+
 ## Security model
 
 The extension operates your real browser, so the safeguards are on by
@@ -121,7 +167,8 @@ default and controlled from the popup:
 
 - **Localhost only.** The server listens on `127.0.0.1` and the WebSocket
   only accepts connections whose `Origin` starts with `chrome-extension://`.
-  There's no daemon: the process exits when ZCode closes its stdin.
+  Over stdio there's no daemon: the process exits when ZCode closes its
+  stdin. [HTTP mode](#http-mode) keeps running and requires a bearer token.
 - **Optional shared token.** Start the server with `ZCODE_CHROME_TOKEN` and
   the extension must send the same token (set it in the popup). Without a
   token, the only defense is the `Origin` header, which has a known gap: any
@@ -178,9 +225,11 @@ npm run smoke        # headless: real server + a simulated extension over WebSoc
 npm run smoke:live   # against your real Chrome, with the extension loaded
 ```
 
-`smoke` checks that the server exposes all 20 tools, rejects web origins and
+`smoke` checks that the server exposes all 22 tools, rejects web origins and
 wrong tokens, that `screenshot` returns an image, that errors carry their
-code, and that the process exits when stdin closes. It also checks that
+code, and that the process exits when stdin closes. In HTTP mode it checks
+the 401 without the token, the `ZCODE_CHROME_TOOLS` list, the settings that
+must stop the server at startup and the stop on SIGTERM. It also checks that
 `dist/offscreen.js` doesn't call any `chrome.*` API outside what Chrome
 exposes to offscreen documents.
 

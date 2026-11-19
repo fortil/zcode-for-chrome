@@ -189,8 +189,27 @@ function selectProfile(bridge: Bridge, args: Record<string, unknown>): ToolResul
   };
 }
 
-export function registerTools(server: McpServer, bridge: Bridge): void {
+/**
+ * Reads ZCODE_CHROME_TOOLS, a comma-separated list of the tools to expose.
+ * Unset exposes them all. A value that names no tool, or an unknown name, is
+ * an error: an empty expansion or a typo must not widen what is exposed.
+ */
+export function parseToolAllowlist(raw: string | undefined): ReadonlySet<ToolName> | undefined {
+  if (raw === undefined) return undefined;
+  const names = raw.split(",").map((name) => name.trim()).filter(Boolean);
+  if (names.length === 0) {
+    throw new Error("ZCODE_CHROME_TOOLS is set but names no tools");
+  }
+  const unknown = names.filter((name) => !Object.hasOwn(TOOL_DESCRIPTIONS, name));
+  if (unknown.length > 0) {
+    throw new Error(`ZCODE_CHROME_TOOLS names unknown tools: ${unknown.join(", ")}`);
+  }
+  return new Set(names as ToolName[]);
+}
+
+export function registerTools(server: McpServer, bridge: Bridge, allowed?: ReadonlySet<ToolName>): void {
   for (const tool of Object.keys(TOOL_DESCRIPTIONS) as ToolName[]) {
+    if (allowed && !allowed.has(tool)) continue;
     const config = { description: TOOL_DESCRIPTIONS[tool], inputSchema: TOOL_SHAPES[tool] };
     if (tool === "browser_status") {
       server.registerTool(tool, config, () => browserStatus(bridge));

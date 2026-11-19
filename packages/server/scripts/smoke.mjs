@@ -6,11 +6,20 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { readFileSync } from "node:fs";
 import { WebSocket } from "ws";
 
 const PORT = 8790; // fuera del rango 8765-8785 para no chocar con un servidor real
 const TOKEN = "smoke-token";
+// The HTTP checks ask the OS for free ports: fixed ones collide with whatever
+// else the machine runs, and a stranger answering on the port looks like a bug.
+let HTTP_PORT = 0;
+let HTTP_BRIDGE_PORT = 0;
+const HTTP_TOKEN = "smoke-http-token";
+const HTTP_TOOLS = ["browser_status", "navigate", "get_page_content"];
 const PNG_1X1 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 const EXPECTED_TOOLS = [
@@ -24,10 +33,16 @@ const FAKE_TAB = { tabId: 1, windowId: 1, title: "Fake", url: "https://example.c
 const FAKE_TAB_B = { tabId: 2, windowId: 1, title: "Fake B", url: "https://b.example.com/", active: true, protected: false };
 
 let transport = null;
+// Servers spawned for the HTTP checks. They have no stdin watchdog, so fail()
+// has to kill them or they would outlive a failed run holding their ports.
+const children = new Set();
 
 function fail(msg) {
   console.error(`SMOKE FAIL: ${msg}`);
   try { transport?._process?.kill("SIGKILL"); } catch { /* best effort */ }
+  for (const child of children) {
+    try { child.kill("SIGKILL"); } catch { /* best effort */ }
+  }
   process.exit(1);
 }
 
@@ -144,7 +159,7 @@ async function main() {
   transport = new StdioClientTransport({
     command: process.execPath,
     args: ["packages/server/dist/index.js"],
-    env: { ...process.env, ZCODE_CHROME_TOKEN: TOKEN, ZCODE_CHROME_PORT: String(PORT) },
+    env: { ...cleanEnv(), ZCODE_CHROME_TOKEN: TOKEN, ZCODE_CHROME_PORT: String(PORT) },
   });
   const client = new Client({ name: "smoke", version: "0.0.0" });
   await client.connect(transport);
@@ -298,8 +313,126 @@ async function main() {
   }
   if (!dead) fail("el proceso servidor seguía vivo 3 s después de cerrar stdin");
 
+  await httpMode();
+
   console.log("SMOKE OK");
   process.exit(0);
+}
+
+// Both probes stay open until both ports are known, so the OS cannot hand
+// out the same port twice.
+async function freePorts(count) {
+  const probes = await Promise.all(Array.from({ length: count }, () => new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => resolve(probe));
+  })));
+  const ports = probes.map((probe) => probe.address().port);
+  await Promise.all(probes.map((probe) => new Promise((resolve) => probe.close(resolve))));
+  return ports;
+}
+
+// The developer's shell may carry ZCODE_CHROME_* settings (a tool list, an
+// HTTP port); the servers under test must only see what each check sets.
+function cleanEnv() {
+  return Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("ZCODE_CHROME_")));
+}
+
+function exitCode(child, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), ms);
+    child.on("exit", (code) => { clearTimeout(timer); resolve(code); });
+  });
+}
+
+function postMcp(authorization) {
+  return fetch(`http://127.0.0.1:${HTTP_PORT}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(authorization ? { authorization } : {}) },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  });
+}
+
+// HTTP mode: the same server as a long-lived process behind a bearer token,
+// with stdin closed from the start (the stdio watchdog must not fire).
+async function httpMode() {
+  [HTTP_PORT, HTTP_BRIDGE_PORT] = await freePorts(2);
+  const env = {
+    ...cleanEnv(),
+    ZCODE_CHROME_PORT: String(HTTP_BRIDGE_PORT),
+    ZCODE_CHROME_HTTP_PORT: String(HTTP_PORT),
+    ZCODE_CHROME_TOOLS: HTTP_TOOLS.join(","),
+  };
+  const launch = (extra) => {
+    const child = spawn(process.execPath, ["packages/server/dist/index.js"], { env: { ...env, ...extra }, stdio: ["ignore", "ignore", "pipe"] });
+    child.stderrText = "";
+    child.stderr.on("data", (chunk) => { child.stderrText += chunk; });
+    children.add(child);
+    child.on("exit", () => children.delete(child));
+    return child;
+  };
+
+  // (9) settings that would leave the endpoint open or wider than asked are
+  // startup errors, each with its own message
+  const refusals = [
+    ["sin token", {}, "ZCODE_CHROME_HTTP_TOKEN"],
+    ["con un token corto", { ZCODE_CHROME_HTTP_TOKEN: "short" }, "ZCODE_CHROME_HTTP_TOKEN"],
+    ["con una tool desconocida", { ZCODE_CHROME_HTTP_TOKEN: HTTP_TOKEN, ZCODE_CHROME_TOOLS: "navigate,no_such_tool" }, "unknown tools: no_such_tool"],
+    ["con la lista de tools vacía", { ZCODE_CHROME_HTTP_TOKEN: HTTP_TOKEN, ZCODE_CHROME_TOOLS: "" }, "names no tools"],
+  ];
+  for (const [label, extra, message] of refusals) {
+    const child = launch(extra);
+    const code = await exitCode(child, 5000);
+    if (code !== 1) fail(`el modo HTTP arrancó ${label} (exit ${code})`);
+    if (!child.stderrText.includes(message)) fail(`${label}: el error no nombra "${message}": ${child.stderrText}`);
+  }
+
+  const child = launch({ ZCODE_CHROME_HTTP_TOKEN: HTTP_TOKEN });
+
+  // (10) no token and a wrong token both get 401, on any path
+  let res = null;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && child.exitCode === null) {
+    try { res = await postMcp(null); break; } catch { await sleep(100); }
+  }
+  if (!res) fail(`el modo HTTP no abrió el puerto en 5 s: ${child.stderrText}`);
+  if (res.status !== 401) fail(`sin token esperaba 401, llegó ${res.status}`);
+  res = await postMcp("Bearer wrong");
+  if (res.status !== 401) fail(`con token malo esperaba 401, llegó ${res.status}`);
+  res = await fetch(`http://127.0.0.1:${HTTP_PORT}/other`);
+  if (res.status !== 401) fail(`sin token, otra ruta esperaba 401, llegó ${res.status}`);
+
+  // (11) with the token: the scheme is case-insensitive, only POST is served
+  res = await postMcp(`bearer ${HTTP_TOKEN}`);
+  if (res.status !== 200) fail(`"bearer" en minúsculas esperaba 200, llegó ${res.status}`);
+  res = await fetch(`http://127.0.0.1:${HTTP_PORT}/mcp`, { headers: { authorization: `Bearer ${HTTP_TOKEN}` } });
+  if (res.status !== 405) fail(`GET /mcp esperaba 405, llegó ${res.status}`);
+
+  // (12) two clients in a row: there is no session to keep between them, and
+  // both see only the allowlisted tools and cannot call any other
+  for (const round of [1, 2]) {
+    const client = new Client({ name: "smoke-http", version: "0.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${HTTP_PORT}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${HTTP_TOKEN}` } },
+    }));
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name).sort();
+    if (JSON.stringify(names) !== JSON.stringify([...HTTP_TOOLS].sort())) {
+      fail(`ronda ${round}: tools/list por HTTP devolvió ${JSON.stringify(names)}`);
+    }
+    const status = textOf(await client.callTool({ name: "browser_status", arguments: {} }));
+    if (status.extensionConnected !== false || status.port !== HTTP_BRIDGE_PORT) {
+      fail(`ronda ${round}: browser_status por HTTP devolvió ${JSON.stringify(status)}`);
+    }
+    const hidden = await client.callTool({ name: "evaluate_js", arguments: { expression: "1" } }).catch(() => ({ isError: true }));
+    if (hidden.isError !== true) fail(`ronda ${round}: evaluate_js respondió fuera de la lista: ${JSON.stringify(hidden)}`);
+    await client.close();
+  }
+
+  // (13) still alive with stdin closed, and SIGTERM stops it
+  if (child.exitCode !== null) fail(`el modo HTTP murió solo: ${child.stderrText}`);
+  child.kill("SIGTERM");
+  if ((await exitCode(child, 3000)) !== 0) fail("el modo HTTP no salió con 0 tras SIGTERM");
 }
 
 // Smoke live (Paso 14): mismo servidor real, pero la extensión es la de verdad,
